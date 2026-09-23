@@ -134,6 +134,13 @@ export interface PermissionModeConfig {
   /** alt+m cycle order; also the display order. */
   cycleOrder: string[];
   modes: Record<string, ModeDef>;
+  /**
+   * Native Windows (experimental, opt-in): use the sandbox-runtime `srt-win`
+   * backend when it is installed and its self-check passes. Default false:
+   * the sandboxed modes prompt before every bash command. Project configs may
+   * set it to false (stricter), never to true.
+   */
+  windowsSandbox?: boolean;
 }
 
 /** Sentinel a mode's `systemPrompt` can use to request the Plan-mode prompt. */

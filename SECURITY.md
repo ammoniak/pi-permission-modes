@@ -82,6 +82,18 @@ you can rely on it appropriately.
   command, and an approved command runs with full user permissions. The
   Windows-aware escape heuristic only labels the prompt. For OS-level
   sandboxing, run pi under **WSL2**.
+- **Experimental native Windows sandbox (opt-in, `windowsSandbox: true`).** It
+  uses sandbox-runtime's **alpha** `srt-win` backend: a separate `srt-sandbox`
+  account, NTFS permission entries (ACEs) it adds for that account, and a WFP
+  egress filter. It is only as tight as the machine's existing ACLs, because the
+  backend never removes access that `Authenticated Users` or `Users` already
+  have. The extension therefore runs a self-check inside the sandbox before
+  trusting it. If the project's parent folder, the drive root, or the helper's
+  folder is writable, or if the parent folder is unreadable, it falls back to
+  prompting. The check covers those folders only: other folders the account can
+  write to on a given machine (e.g. under `C:\ProgramData`) stay writable.
+  Upstream's own caveats also apply, for example that the proxy token is visible
+  on the runner's command line to local principals.
 - **Fixed in 2.2.1 — Windows "path-confinement sandbox" was not a sandbox.**
   Up to 2.2.0 the sandboxed modes reported `ready` on Windows and ran bash
   through a string-matching wrapper, so in-project-looking commands ran

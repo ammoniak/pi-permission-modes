@@ -34,6 +34,8 @@ export interface AwarenessOptions {
   networkOpen?: boolean;
   /** Session-granted domains (via prompts, /net allow, request_network_access). */
   sessionDomains?: string[];
+  /** Host platform; win32 adds the Windows backend's quirks. Defaults to `process.platform`. */
+  platform?: NodeJS.Platform;
 }
 
 /** Render an allowWrite entry for the prompt ("." is the project root). */
@@ -91,6 +93,12 @@ export function sandboxAwarenessPrompt(mode: ModeDef, opts: AwarenessOptions): s
       sb.askOnBlockedHost === false
         ? `${scope} Other hosts are silently unreachable — request access with the request_network_access tool.`
         : `${scope} A request to any other host pauses while the user is asked to allow it — if they approve, simply retry the command. To get domains approved up front (e.g. before an install that hits several hosts), call the request_network_access tool.`,
+    );
+  }
+  if ((opts.platform ?? process.platform) === "win32") {
+    lines.push(
+      "- Windows: bash runs in Git Bash as a separate `srt-sandbox` user with its own home, so tools installed only in the user's profile (nvm, `pip install --user`, per-user winget/Scoop) are unavailable; machine-wide installs work.",
+      "- Windows: TLS certificate-revocation checks can't reach the network. On CRYPT_E_REVOCATION_OFFLINE use `curl --ssl-no-revoke` or `git -c http.schannelCheckRevoke=false`.",
     );
   }
   lines.push(

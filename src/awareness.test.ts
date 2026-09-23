@@ -118,3 +118,11 @@ test("degraded: short note with the reason, no boundary bullets", () => {
   const bare = sandboxAwarenessPrompt(mode(), { active: false });
   assert.match(bare ?? "", /unavailable here\.\n/);
 });
+
+test("win32: notes the separate sandbox user and the revocation workaround; not on linux", () => {
+  const win = sandboxAwarenessPrompt(mode(), { active: true, platform: "win32" })!;
+  assert.match(win, /`srt-sandbox` user/);
+  assert.match(win, /--ssl-no-revoke/);
+  const linux = sandboxAwarenessPrompt(mode(), { active: true, platform: "linux" })!;
+  assert.doesNotMatch(linux, /srt-sandbox/);
+});

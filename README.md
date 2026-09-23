@@ -77,6 +77,60 @@ enforcement: an approved command runs with your full user permissions.
 For real isolation on Windows, run pi under **WSL2** (see the Linux
 instructions above).
 
+### Experimental: native Windows sandbox
+
+The sandbox runtime has an **alpha** Windows backend, and this extension can use
+it on an opt-in basis. Bash then runs in Git Bash as a dedicated local
+`srt-sandbox` user:
+- writes are allowed only where that user is granted access (the project);
+- the Windows Filtering Platform (WFP) blocks every outgoing connection except
+  through the same domain allowlist and live prompts as on Linux/macOS.
+
+It is **off by default**. To try it:
+
+1. Install Git for Windows machine-wide (the default `Program Files` install).
+2. Put `"windowsSandbox": true` in the **global** config
+   (`~/.pi/agent/permission-mode/permission-mode.json`). A project config can
+   only switch it off.
+3. Restart pi and run `/sandbox install`. Windows shows one UAC prompt, and the
+   install creates the `srt-sandbox` account and its WFP filters.
+   `/sandbox uninstall` removes both.
+4. Keep projects in a folder that other local users can't write to (see below).
+
+Before trusting the sandbox, the extension runs a self-check **inside** it and
+falls back to prompting (with the reason in the footer) if either of these holds:
+- **It can write outside the project:** the project's parent folder, the drive
+  root, or the folder holding the sandbox helper. The backend only *adds*
+  permissions for its user and doesn't remove existing ones. Every folder created
+  at a drive root (`C:\ws`, `C:\src`, …) inherits `Authenticated Users: Modify`,
+  and `srt-sandbox` is an authenticated user, so sibling projects would be
+  writable.
+- **It can't see the project's parent folder.** This is the case for projects
+  inside your user profile (`C:\Users\<you>\…`), where git fails inside the
+  sandbox.
+
+A layout that passes: one folder for your projects, readable by everyone and
+writable only by you:
+
+```powershell
+mkdir C:\src
+icacls C:\src /inheritance:r /grant:r "${env:USERNAME}:(OI)(CI)F" "*S-1-5-18:(OI)(CI)F" "*S-1-5-32-544:(OI)(CI)F" "*S-1-5-32-545:(OI)(CI)RX"
+```
+
+Other limitations:
+- **Missing tools.** Tools installed only in your profile (nvm, `pip install
+  --user`, per-user winget/Scoop) aren't reachable from the sandbox. Machine-wide
+  installs work.
+- **Certificate-revocation errors.** Revocation checks can't reach the network
+  (`CRYPT_E_REVOCATION_OFFLINE`). Use `curl --ssl-no-revoke` or
+  `git -c http.schannelCheckRevoke=false`.
+- **Slower start and mode switches.** Starting the sandbox, and switching between
+  a writable mode and Plan mode, re-apply permissions across the project tree.
+  That takes seconds for large trees (e.g. `node_modules`).
+- **Where the helper lives.** The sandbox helper (`srt-win.exe`) is copied to
+  `%LOCALAPPDATA%\pi-permission-modes\`, the one folder in your profile the
+  sandbox user may read, because it can't launch the bundled copy.
+
 ### Windows tips
 
 - On Windows, `alt+m` cycles modes and `alt+n` toggles network filtering, just

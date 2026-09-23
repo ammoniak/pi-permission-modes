@@ -288,6 +288,22 @@ test("project: askOnBlockedHost can be forced off (silent deny), never back on",
   s.cleanup();
 });
 
+test("windowsSandbox: off by default, only the global config can opt in, a project can opt out", () => {
+  const dflt = sandbox({ project: { windowsSandbox: true } });
+  const c0 = loadModeConfig(dflt.cwd, dflt.agentDir, (m) => dflt.errors.push(m));
+  assert.notEqual(c0.windowsSandbox, true);
+  assert.ok(dflt.errors.some((e) => /cannot enable windowsSandbox/.test(e)));
+  dflt.cleanup();
+
+  const on = sandbox({ global: { windowsSandbox: true } });
+  assert.equal(loadModeConfig(on.cwd, on.agentDir).windowsSandbox, true);
+  on.cleanup();
+
+  const optOut = sandbox({ global: { windowsSandbox: true }, project: { windowsSandbox: false } });
+  assert.equal(loadModeConfig(optOut.cwd, optOut.agentDir).windowsSandbox, false);
+  optOut.cleanup();
+});
+
 test("persistModeRule: converts a string surface to a map and preserves other content", () => {
   const s = sandbox({
     global: { $schema: "./x.json", modes: { default: { permission: { tool: "allow", bash: "deny" } } } },

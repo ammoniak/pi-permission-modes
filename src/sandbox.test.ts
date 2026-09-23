@@ -18,6 +18,7 @@ import {
   createSandboxedBashOps,
   type InitOptions,
   WINDOWS_NO_SANDBOX_WARN,
+  WINDOWS_NOT_INSTALLED_WARN,
 } from "./sandbox.ts";
 import type { SandboxProfile } from "./schema.ts";
 
@@ -214,7 +215,8 @@ test("init: clears all state before re-init", async () => {
 });
 
 // ---------------------------------------------------------------------------
-// Native Windows — no OS sandbox: degrade honestly so bash prompts
+// Native Windows — srt-win backend when installed and the self-check passes,
+// otherwise degrade honestly so bash prompts
 // ---------------------------------------------------------------------------
 
 const WIN_PROFILE = {
@@ -226,49 +228,219 @@ const WIN_PROFILE = {
   network: { allowedDomains: [], deniedDomains: [] },
 };
 
-test("init (win32): degrades — never reports ready, warns, notifies once", async () => {
-  const notified: string[] = [];
-  const { controller, initOpts } = buildController(WIN_PROFILE, {
+const FAKE_BASH = "C:\\Program Files\\Git\\bin\\bash.exe";
+const PROBE_OK = "PI-SRT-PROBE DONE\n";
+
+/**
+ * A fake sandbox-runtime module for the win32 branch. `wrapWithSandboxArgv`
+ * returns a node one-liner that prints `output`, so the spawn path runs for
+ * real on any host.
+ */
+function makeFakeWinRuntime(opts: { provisioned?: boolean; output?: string } = {}) {
+  let provisioned = opts.provisioned ?? true;
+  const output = opts.output ?? PROBE_OK;
+  const calls: Array<{ method: string; args: unknown[] }> = [];
+  const SandboxManager = {
+    initialize: async (...args: unknown[]) => {
+      calls.push({ method: "initialize", args });
+    },
+    reset: async () => {
+      calls.push({ method: "reset", args: [] });
+    },
+    wrapWithSandboxArgv: async (...args: unknown[]) => {
+      calls.push({ method: "wrapWithSandboxArgv", args });
+      return { argv: [process.execPath, "-e", `process.stdout.write(${JSON.stringify(output)})`], env: process.env };
+    },
+  };
+  const rt = {
+    SandboxManager,
+    VENDORED_SRT_WIN_EXE: "C:\\ext\\node_modules\\srt-win.exe",
+    resolveSrtWin: (cfg: { path: string }) => ({ exe: cfg.path, prependArgs: [] }),
+    checkWindowsSandboxStatusAsync: async () => ({ user: { provisioned }, wfp: {} }),
+    installWindowsSandboxAsync: async () => {
+      calls.push({ method: "install", args: [] });
+      provisioned = true;
+      return {};
+    },
+    uninstallWindowsSandbox: () => {
+      calls.push({ method: "uninstall", args: [] });
+      provisioned = false;
+      return {};
+    },
+  };
+  return { loadRuntime: async () => rt as never, calls };
+}
+
+function buildWinController(
+  fake: ReturnType<typeof makeFakeWinRuntime>,
+  extra: Partial<InitOptions> = {},
+  profile: SandboxProfile = WIN_PROFILE,
+) {
+  return buildController(profile, {
     platform: "win32",
-    hasUI: true,
-    notify: (m) => notified.push(m),
+    windowsSandbox: true,
+    loadRuntime: fake.loadRuntime,
+    findBash: () => FAKE_BASH,
+    stageHelper: (exe) => exe,
+    ...extra,
   });
+}
+
+const count = (calls: Array<{ method: string }>, method: string) => calls.filter((c) => c.method === method).length;
+
+test("init (win32): installed + self-check passes → ready, srt-win path in the runtime config", async () => {
+  const fake = makeFakeWinRuntime();
+  const { controller, initOpts } = buildWinController(fake);
+  await controller.init(initOpts);
+  assert.equal(controller.ready, true);
+  assert.equal(controller.warn, undefined);
+  const cfg = fake.calls.find((c) => c.method === "initialize")!.args[0] as { windows?: { srtWin?: { path: string } } };
+  assert.equal(cfg.windows?.srtWin?.path, "C:\\ext\\node_modules\\srt-win.exe");
+  assert.equal(count(fake.calls, "wrapWithSandboxArgv"), 1); // the self-check
+});
+
+test("init (win32): not installed → degraded with the install hint, runtime never initialized", async () => {
+  const notified: string[] = [];
+  const fake = makeFakeWinRuntime({ provisioned: false });
+  const { controller, initOpts } = buildWinController(fake, { notify: (m) => notified.push(m) });
   await controller.init(initOpts);
   assert.equal(controller.ready, false);
-  assert.equal(internals(controller).degraded, true);
-  assert.equal(controller.disabled, false);
-  assert.equal(controller.warn, WINDOWS_NO_SANDBOX_WARN);
+  assert.equal(controller.warn, WINDOWS_NOT_INSTALLED_WARN);
+  assert.equal(count(fake.calls, "initialize"), 0);
   assert.equal(notified.length, 1);
-  assert.match(notified[0], /no OS sandbox on native Windows/);
-  assert.equal(controller.sandboxManager, null);
+  assert.match(notified[0], /\/sandbox install/);
+  assert.equal(controller.bashOps(), null);
 });
 
-test("init (win32): no notification without a UI", async () => {
-  const notified: string[] = [];
-  const { controller, initOpts } = buildController(WIN_PROFILE, {
-    platform: "win32",
-    hasUI: false,
-    notify: (m) => notified.push(m),
+for (const windowsSandbox of [undefined, false]) {
+  test(`init (win32): windowsSandbox ${windowsSandbox} keeps prompting without loading the runtime`, async () => {
+    const notified: string[] = [];
+    const { controller, initOpts } = buildController(WIN_PROFILE, {
+      platform: "win32",
+      windowsSandbox,
+      notify: (m) => notified.push(m),
+      loadRuntime: async () => {
+        throw new Error("must not load");
+      },
+    });
+    await controller.init(initOpts);
+    assert.equal(controller.ready, false);
+    assert.equal(controller.warn, WINDOWS_NO_SANDBOX_WARN);
+    assert.match(notified[0], /"windowsSandbox": true/);
   });
+}
+
+test("init (win32): deny entries inside the user profile are dropped unless under a write grant", async () => {
+  const fake = makeFakeWinRuntime();
+  const home = process.env.USERPROFILE;
+  process.env.USERPROFILE = "C:\\Users\\me";
+  try {
+    const { controller, initOpts } = buildWinController(fake, {}, {
+      ...WIN_PROFILE,
+      allowWrite: [".", "~/.cache"],
+      denyRead: ["~/.ssh", "~\\.aws", "~/.cache/secret", "D:\\keys"],
+      denyWrite: ["~/.gitconfig"],
+    });
+    await controller.init(initOpts);
+    const cfg = fake.calls.find((c) => c.method === "initialize")!.args[0] as {
+      filesystem: { denyRead: string[]; denyWrite: string[] };
+    };
+    assert.deepEqual(cfg.filesystem.denyRead, ["~/.cache/secret", "D:\\keys"]);
+    assert.deepEqual(cfg.filesystem.denyWrite, []);
+  } finally {
+    if (home === undefined) delete process.env.USERPROFILE;
+    else process.env.USERPROFILE = home;
+  }
+});
+
+test("init (win32): no machine-wide Git Bash → degraded", async () => {
+  const fake = makeFakeWinRuntime();
+  const { controller, initOpts } = buildWinController(fake, { findBash: () => undefined });
   await controller.init(initOpts);
   assert.equal(controller.ready, false);
-  assert.equal(notified.length, 0);
+  assert.match(controller.warn ?? "", /Git Bash not found/);
+  assert.equal(count(fake.calls, "initialize"), 0);
 });
 
-test("applyProfile (win32): switching modes never flips ready on", async () => {
-  const { controller, initOpts } = buildController(WIN_PROFILE, { platform: "win32" });
+test("init (win32): self-check finds a writable folder outside the project → degraded + reset", async () => {
+  const notified: string[] = [];
+  const fake = makeFakeWinRuntime({ output: "PI-SRT-PROBE WRITABLE C:\\ws\nPI-SRT-PROBE DONE\n" });
+  const { controller, initOpts } = buildWinController(fake, { notify: (m) => notified.push(m) });
   await controller.init(initOpts);
-  await controller.applyProfile(WIN_PROFILE);
+  assert.equal(controller.ready, false);
+  assert.match(controller.warn ?? "", /C:\\ws writable by the sandbox user/);
+  assert.equal(count(fake.calls, "reset"), 1);
+  assert.match(notified.at(-1) ?? "", /Tighten the folder's ACL/);
+  assert.equal(controller.bashOps(), null);
+  // Later mode switches don't bring it back.
   await controller.applyProfile({ ...WIN_PROFILE, writable: false, allowWrite: [] });
   assert.equal(controller.ready, false);
-  assert.equal(controller.warn, WINDOWS_NO_SANDBOX_WARN);
 });
 
-test("bashOps (win32): no sandboxed operations are offered", async () => {
-  const { controller, initOpts } = buildController(WIN_PROFILE, { platform: "win32" });
+test("init (win32): self-check can't see the project's parent → degraded", async () => {
+  const fake = makeFakeWinRuntime({ output: "PI-SRT-PROBE HIDDEN C:\\Users\\me\\code\nPI-SRT-PROBE DONE\n" });
+  const { controller, initOpts } = buildWinController(fake);
   await controller.init(initOpts);
-  assert.equal(controller.bashOps(), null);
+  assert.equal(controller.ready, false);
+  assert.match(controller.warn ?? "", /can't see C:\\Users\\me\\code/);
+});
+
+test("init (win32): an incomplete self-check fails closed", async () => {
+  const fake = makeFakeWinRuntime({ output: "" });
+  const { controller, initOpts } = buildWinController(fake);
+  await controller.init(initOpts);
+  assert.equal(controller.ready, false);
+  assert.match(controller.warn ?? "", /did not complete/);
+});
+
+test("bashOps (win32): runs Git Bash via wrapWithSandboxArgv and spawns its argv", async () => {
+  const fake = makeFakeWinRuntime();
+  const { controller, initOpts } = buildWinController(fake);
+  await controller.init(initOpts);
+  const ops = controller.bashOps();
+  assert.ok(ops);
+  let out = "";
+  const r = await ops.exec("echo hi", initOpts.cwd, { onData: (d: Buffer) => (out += d.toString()) });
+  assert.equal(r.exitCode, 0);
+  assert.equal(out, PROBE_OK); // the fake argv's output
+  const wrap = fake.calls.filter((c) => c.method === "wrapWithSandboxArgv").at(-1)!.args;
+  assert.match(wrap[0] as string, /echo hi$/);
+  assert.deepEqual(wrap[1], { exe: FAKE_BASH, args: ["-c"] });
+  assert.equal(wrap[2], undefined); // never a per-command config on Windows
+  assert.equal(wrap[4], initOpts.cwd);
+});
+
+test("bashOps (win32): read-only is session-wide — mismatches return null, a Plan switch re-inits", async () => {
+  const fake = makeFakeWinRuntime();
+  const { controller, initOpts } = buildWinController(fake);
+  await controller.init(initOpts);
+  assert.ok(controller.bashOps());
   assert.equal(controller.bashOps({ readOnly: true }), null);
+
+  await controller.applyProfile({ ...WIN_PROFILE, writable: false });
+  assert.equal(controller.ready, true);
+  const inits = fake.calls.filter((c) => c.method === "initialize");
+  assert.equal(inits.length, 2);
+  const cfg = inits[1].args[0] as { filesystem: { allowWrite: string[] } };
+  assert.deepEqual(cfg.filesystem.allowWrite, []);
+  assert.equal(count(fake.calls, "wrapWithSandboxArgv"), 1); // self-check only once per init
+  assert.ok(controller.bashOps({ readOnly: true }));
+  assert.equal(controller.bashOps(), null);
+});
+
+test("windowsSetup: install re-runs init and activates; uninstall resets and degrades", async () => {
+  const fake = makeFakeWinRuntime({ provisioned: false });
+  const { controller, initOpts } = buildWinController(fake);
+  await controller.init(initOpts);
+  assert.equal(controller.ready, false);
+
+  assert.match(await controller.windowsSetup("install"), /installed and active/);
+  assert.equal(controller.ready, true);
+
+  assert.match(await controller.windowsSetup("uninstall"), /removed/);
+  assert.equal(count(fake.calls, "reset"), 1);
+  assert.equal(controller.ready, false);
+  assert.equal(controller.warn, WINDOWS_NOT_INSTALLED_WARN);
 });
 
 test("init (win32): --no-sandbox still wins (disabled, not the Windows warning)", async () => {
@@ -429,4 +601,17 @@ test("bashOps: returns null when manager is missing", async () => {
 test("installHint: returns the correct format", () => {
   const hint = (SandboxController as unknown as { installHint: () => string }).installHint();
   assert.match(hint, /Fix:.*npm install/);
+});
+
+test("init (win32): failing to stage srt-win degrades instead of throwing", async () => {
+  const fake = makeFakeWinRuntime();
+  const { controller, initOpts } = buildWinController(fake, {
+    stageHelper: () => {
+      throw new Error("disk full");
+    },
+  });
+  await controller.init(initOpts);
+  assert.equal(controller.ready, false);
+  assert.match(controller.warn ?? "", /could not stage srt-win \(disk full\)/);
+  assert.equal(count(fake.calls, "initialize"), 0);
 });

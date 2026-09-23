@@ -4,6 +4,35 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.0.0/), and this project adheres
 to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.3.0]
+
+### Added
+- **Experimental native Windows sandbox** (opt-in with `"windowsSandbox": true`
+  in the global config). It uses sandbox-runtime's alpha `srt-win` backend: bash
+  runs in Git Bash as a dedicated `srt-sandbox` user, with ACL-based write
+  confinement and a WFP egress filter behind the usual allowlist and live
+  network prompts.
+  - `/sandbox install` / `/sandbox uninstall` set the backend up or remove it
+    (one UAC prompt each).
+  - Before the sandbox is trusted, a self-check runs inside it. It falls back
+    to prompting when folders outside the project (the parent, the drive root,
+    the helper's folder) are writable, or when the parent is unreadable (a
+    project inside the user profile, where git fails).
+  - Plan mode applies read-only for the whole session. The backend can't drop
+    writes per command.
+  - Deny entries inside the user profile (`~/.ssh`, …) are skipped on Windows.
+    The sandbox user can't read the profile anyway, and stamping them made the
+    runtime rewrite the profile's ACL for minutes.
+  - The helper is staged into `%LOCALAPPDATA%\pi-permission-modes\`, the one
+    folder in the profile the sandbox user may read.
+  - The host git identity is passed into the sandbox, which has no global
+    gitconfig of its own.
+
+### Changed
+- `@anthropic-ai/sandbox-runtime` 0.0.26 → 0.0.77.
+- Shared child-process supervision (`superviseChild`) for the Linux/macOS and
+  Windows bash paths.
+
 ## [2.2.1]
 
 ### Security

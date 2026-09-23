@@ -374,8 +374,31 @@ export default async function (pi: ExtensionAPI) {
   });
 
   pi.registerCommand("sandbox", {
-    description: "Show the active mode's sandbox status and configuration",
-    handler: async (_args, ctx) => {
+    description:
+      process.platform === "win32"
+        ? "Sandbox status, or set up the Windows sandbox: /sandbox [install|uninstall]"
+        : "Show the active mode's sandbox status and configuration",
+    handler: async (args, ctx) => {
+      const action = args.trim().toLowerCase();
+      if (action === "install" || action === "uninstall") {
+        if (process.platform !== "win32") return ctx.ui.notify(`/sandbox ${action} is only for native Windows`, "warning");
+        const ok = await ctx.ui.confirm(
+          action === "install" ? "Install the Windows sandbox?" : "Remove the Windows sandbox?",
+          action === "install"
+            ? "Creates a local `srt-sandbox` user account and machine-wide firewall (WFP) filters that apply only to that " +
+                "account. Sandboxed bash then runs as that user. Windows shows one UAC prompt. Undo with /sandbox uninstall."
+            : "Removes the `srt-sandbox` user account and its firewall filters (one UAC prompt). The sandboxed modes then " +
+                "ask before every bash command.",
+        );
+        if (!ok) return;
+        try {
+          ctx.ui.notify(await sandbox.windowsSetup(action), "info");
+        } catch (err) {
+          ctx.ui.notify(`Windows sandbox ${action} failed: ${err instanceof Error ? err.message : String(err)}`, "error");
+        }
+        updateStatus(ctx, currentMode(), sandbox, net.open);
+        return;
+      }
       const m = currentMode();
       if (!m.sandbox.enabled) {
         return ctx.ui.notify(`${m.label}: sandbox disabled for this mode (bash runs unsandboxed)`, "info");
@@ -505,6 +528,7 @@ export default async function (pi: ExtensionAPI) {
       // outside the allowlist; unknown hosts prompt via askNetHost.
       askHost: (host, port) => net.decide(host, port, askNetHost),
       drainBlockedHosts: () => net.drainBlocked(),
+      windowsSandbox: config.windowsSandbox,
     });
     await setMode(picked.name, ctx, false, picked.fallback);
   });

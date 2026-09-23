@@ -20,6 +20,11 @@
       "type": "object",
       "description": "Map of mode name → mode definition.",
       "additionalProperties": { "$ref": "#/$defs/mode" }
+    },
+    "windowsSandbox": {
+      "type": "boolean",
+      "default": false,
+      "description": "Native Windows, experimental: sandbox bash with the sandbox-runtime srt-win backend (a dedicated srt-sandbox user) when it is installed (/sandbox install) and its self-check passes. Off by default: the sandboxed modes prompt before every bash command. Only the global config can turn it on."
     }
   },
   "$defs": {

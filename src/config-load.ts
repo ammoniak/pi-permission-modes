@@ -197,7 +197,8 @@ function mergeGlobal(base: PermissionModeConfig, over: Partial<PermissionModeCon
   const cycleOrder = (over.cycleOrder ?? base.cycleOrder).filter((n) => modes[n]);
   let defaultMode = over.defaultMode ?? base.defaultMode;
   if (!modes[defaultMode]) defaultMode = cycleOrder[0] ?? base.defaultMode;
-  return { defaultMode, cycleOrder, modes };
+  const windowsSandbox = over.windowsSandbox ?? base.windowsSandbox;
+  return { defaultMode, cycleOrder, modes, ...(windowsSandbox !== undefined ? { windowsSandbox } : {}) };
 }
 
 // ---------------------------------------------------------------------------
@@ -240,6 +241,10 @@ function tightenSandbox(base: SandboxProfile, over: Partial<SandboxProfile>, onE
 function applyProject(config: PermissionModeConfig, project: Partial<PermissionModeConfig>, onError: OnError): void {
   if (project.defaultMode || project.cycleOrder) {
     onError("permission-mode: project config cannot change defaultMode/cycleOrder; ignoring");
+  }
+  if (project.windowsSandbox === false) config.windowsSandbox = false; // prompting is stricter than sandboxing
+  else if (project.windowsSandbox === true && config.windowsSandbox !== true) {
+    onError("permission-mode: project config cannot enable windowsSandbox; ignoring");
   }
   for (const [name, raw] of Object.entries(project.modes ?? {})) {
     const base = config.modes[name];
