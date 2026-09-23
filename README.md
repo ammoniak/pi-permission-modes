@@ -63,27 +63,22 @@ sudo apt install -y bubblewrap socat ripgrep
 
 On **macOS** the sandbox uses the built-in `sandbox-exec` — no extra packages.
 
-On **native Windows**, the extension provides **path confinement sandboxing**
-via the `WinSandboxController`. Instead of an OS-level sandbox (bubblewrap /
-sandbox-exec), it wraps PowerShell and Git Bash commands with strict path
-enforcement — writes are confined to the project directory, protected Windows
-paths (System32, registry files, etc.) are blocked, and privilege escalation
-attempts are detected. PowerShell is required (PowerShell 7 preferred); without
-it the extension falls back to policy-only enforcement (the allow/ask/deny
- gates still apply). The footer shows
-`Build (sandboxed (path confinement), alt+m)` to distinguish it from the
-full OS-level sandbox.
+On **native Windows** there is **no OS-level sandbox** yet: the sandbox
+runtime supports only bubblewrap and `sandbox-exec`. The sandboxed modes
+therefore **degrade to prompting** — every bash command asks for confirmation
+(approvals can be remembered per command for the session), and the footer
+shows `Build (alt+m) (!) no OS sandbox on native Windows — bash asks first`.
+The allow/ask/deny policy, protected-path blocks for the Edit/Write tools, and
+the escape heuristic still apply; the heuristic understands Windows paths
+(`C:\…`, `~\…`, `$env:USERPROFILE\…`, `%USERPROFILE%\…`, `..\…`), so a prompt
+names the out-of-project path it found. It is a hint for the prompt, **not**
+enforcement: an approved command runs with your full user permissions.
 
-> **Note:** Windows path confinement is best-effort at the command layer.
-The policy engine's gates (allow/ask/deny) remain the primary enforcement. For
-full OS-level sandboxing, run pi under WSL2 (see Linux instructions above).
+For real isolation on Windows, run pi under **WSL2** (see the Linux
+instructions above).
 
 ### Windows tips
 
-- Install **PowerShell 7** (`pwsh`) from the Microsoft Store or GitHub for the
-  best experience.
-- **Git Bash** is optional but recommended for the `bash` tool — the sandbox
-  controller uses it when available.
 - On Windows, `alt+m` cycles modes and `alt+n` toggles network filtering, just
   like other platforms.
 

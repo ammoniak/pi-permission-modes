@@ -77,13 +77,21 @@ you can rely on it appropriately.
   (they derive the same fallback themselves). Don't rely on forwarding as a
   security boundary — the child enforces its own modes regardless.
 - **Platform**: Linux (needs `bubblewrap`, `socat`, `ripgrep`) and macOS —
-  full OS-level sandbox (`bubblewrap` / `sandbox-exec`). **Windows** ships a
-  **path-confinement sandbox** via the `WinSandboxController` (PowerShell-based):
-  writes are confined to the project directory, protected Windows paths
-  (System32, registry files, etc.) are blocked, and privilege escalation
-  attempts are detected. This is best-effort at the command layer — the
-  policy engine's gates (allow/ask/deny) remain the primary enforcement.
-  For full OS-level sandboxing, run pi under **WSL2**.
+  full OS-level sandbox (`bubblewrap` / `sandbox-exec`). **Native Windows has
+  no OS sandbox**: the sandboxed modes degrade to prompting before every bash
+  command, and an approved command runs with full user permissions. The
+  Windows-aware escape heuristic only labels the prompt. For OS-level
+  sandboxing, run pi under **WSL2**.
+- **Fixed in 2.2.1 — Windows "path-confinement sandbox" was not a sandbox.**
+  Up to 2.2.0 the sandboxed modes reported `ready` on Windows and ran bash
+  through a string-matching wrapper, so in-project-looking commands ran
+  **silently and unconfined**. For example, `Remove-Item
+  $env:USERPROFILE\Documents\<file>` deleted the file: `$env:` was never
+  expanded, and the path resolved "inside" the project. Commands built from
+  variables, `cmd /c`, or .NET calls bypassed the wrapper anyway. The wrapper
+  is removed; Windows now reports the sandbox as unavailable, so bash always
+  prompts. If bash runs sandboxed but no sandboxed operations can be built,
+  it now fails closed instead of falling back to unsandboxed execution.
 - **Git worktrees/submodules** can't be OS-sandboxed (bubblewrap can't bind
   `.git/hooks` under a `.git` file); those projects degrade to prompting.
 

@@ -109,3 +109,16 @@ export function bashExecPlan(
     readOnly: !sandboxWritable,
   };
 }
+
+/**
+ * Pick the operations for an approved bash run: `null` means "run with the
+ * local (unsandboxed) bash". Fails closed: when the plan says sandboxed but no
+ * sandboxed operations can be built, this throws instead of silently running
+ * the command unconfined.
+ */
+export function resolveBashOps<T>(plan: BashExecPlan, sandboxedOps: () => T | null): T | null {
+  if (!plan.sandboxed) return null;
+  const ops = sandboxedOps();
+  if (!ops) throw new Error("permission-mode: sandbox unavailable for this run — refusing to run bash unsandboxed");
+  return ops;
+}

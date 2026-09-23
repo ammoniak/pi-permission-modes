@@ -4,6 +4,35 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.0.0/), and this project adheres
 to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.2.1]
+
+### Security
+- **Windows: sandboxed modes no longer claim a sandbox.** The "path
+  confinement" wrapper (`win-sandbox.ts`) was string matching, not
+  confinement. The controller still reported `ready`, so bash ran **silently
+  and unconfined**. `Remove-Item $env:USERPROFILE\Documents\<file>` deleted the
+  file from a project elsewhere: `$env:` was never expanded, and the path
+  resolved "inside" the project. On native Windows the sandbox now degrades
+  like any unsupported platform: every bash command in a sandboxed mode
+  prompts, and the footer says `no OS sandbox on native Windows`. Use WSL2 for
+  real isolation.
+- **Fail closed.** If a run is planned as sandboxed but no sandboxed
+  operations can be built, bash now throws instead of falling back to
+  unsandboxed execution.
+
+### Changed
+- **Escape heuristic understands Windows paths** on win32: `C:\…`, `c:/…`,
+  `D:rel`, UNC, `/c/…`, `~\…`, `$env:X\…`, `${env:X}`, `$HOME`, `%X%\…` and
+  `..\…`. It also reads into `powershell|pwsh -Command …` and `cmd /c …`
+  scripts. PowerShell `-EncodedCommand` always prompts. `runas`, `gsudo` and
+  `Start-Process -Verb RunAs` count as privilege escalation. Containment is
+  boundary-aware (`C:\ws\proj2` is outside `C:\ws\proj`).
+
+### Removed
+- `src/win-sandbox.ts` (the PowerShell/Git Bash wrapper and
+  `WinSandboxController`), `src/win-heuristics.ts` (unwired), and the unused
+  Windows protected-path lists in `src/win-paths.ts`.
+
 ## [2.2.0]
 
 ### Added

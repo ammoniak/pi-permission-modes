@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { type BashGate, bashExecPlan, bashGate } from "./bash-enforce.ts";
+import { type BashGate, bashExecPlan, bashGate, resolveBashOps } from "./bash-enforce.ts";
 
 const OUTSIDE = "path outside project: /etc/passwd";
 
@@ -58,4 +58,23 @@ test("bashExecPlan: sandboxed iff enabled & ready & not escaped; readOnly iff no
   assert.equal(bashExecPlan(true, true, true, true).sandboxed, false);
   // Sandbox down → unsandboxed.
   assert.equal(bashExecPlan(true, true, false, false).sandboxed, false);
+});
+
+test("resolveBashOps: unsandboxed plan uses local bash without building ops", () => {
+  let built = 0;
+  const ops = resolveBashOps({ sandboxed: false, readOnly: false }, () => {
+    built++;
+    return {};
+  });
+  assert.equal(ops, null);
+  assert.equal(built, 0);
+});
+
+test("resolveBashOps: sandboxed plan returns the sandboxed ops", () => {
+  const sandboxed = { tag: "sandboxed" };
+  assert.equal(resolveBashOps({ sandboxed: true, readOnly: true }, () => sandboxed), sandboxed);
+});
+
+test("resolveBashOps: sandboxed plan without ops fails closed (never runs unconfined)", () => {
+  assert.throws(() => resolveBashOps({ sandboxed: true, readOnly: false }, () => null), /refusing to run bash unsandboxed/);
 });

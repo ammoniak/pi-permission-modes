@@ -4,8 +4,8 @@
  *
  * Hermetic: uses fake SandboxManager mocks to test the
  * initialize/reset/applyProfile flow, and creates temp dirs for path-based
- * checks. On Windows, the init path delegates to WinSandboxController, so
- * some Linux/macOS-specific tests are guarded by the platform.
+ * checks. The win32 branch is exercised on any host via the injected
+ * `platform` init option.
  */
 
 import assert from "node:assert/strict";
@@ -17,6 +17,7 @@ import {
   SandboxController,
   createSandboxedBashOps,
   type InitOptions,
+  WINDOWS_NO_SANDBOX_WARN,
 } from "./sandbox.ts";
 import type { SandboxProfile } from "./schema.ts";
 
@@ -119,7 +120,7 @@ test("init: no-sandbox sets disabled + degraded", async () => {
 });
 
 test("init: no-sandbox sets degraded even on win32", async () => {
-  const { controller, initOpts } = buildController(undefined, { noSandbox: true });
+  const { controller, initOpts } = buildController(undefined, { noSandbox: true, platform: "win32" });
   await controller.init(initOpts);
   assert.equal(internals(controller).degraded, true);
   assert.equal(controller.disabled, true);
@@ -150,17 +151,6 @@ test("init: gitworktree (.git is non-empty file) degrades", async () => {
     assert.ok(controller.ready || internals(controller).degraded);
   } finally {
     rmSync(root, { recursive: true, force: true });
-  }
-});
-
-test("init: stores cwd", async () => {
-  const cwd = mkdtempSync(path.join(tmpdir(), "perm-cwd-"));
-  try {
-    const { controller, initOpts } = buildController(undefined, { cwd });
-    await controller.init(initOpts);
-    assert.equal(controller.cwd, cwd);
-  } finally {
-    rmSync(cwd, { recursive: true, force: true });
   }
 });
 
@@ -224,60 +214,76 @@ test("init: clears all state before re-init", async () => {
 });
 
 // ---------------------------------------------------------------------------
-// applyProfile — Windows branch (this platform)
+// Native Windows — no OS sandbox: degrade honestly so bash prompts
 // ---------------------------------------------------------------------------
 
-test("applyProfile: Windows branch sets ready when profile enabled", async () => {
-  const ctrl = new SandboxController();
-  await ctrl.init({
-    cwd: mkdtempSync(path.join(tmpdir(), "perm-ap-")),
-    noSandbox: false,
-    hasUI: false,
-    notify: () => {},
-    profile: {
-      enabled: true,
-      writable: true,
-      allowWrite: ["."],
-      denyWrite: [],
-      denyRead: [],
-      network: { allowedDomains: [], deniedDomains: [] },
-    },
+const WIN_PROFILE = {
+  enabled: true,
+  writable: true,
+  allowWrite: ["."],
+  denyWrite: [],
+  denyRead: [],
+  network: { allowedDomains: [], deniedDomains: [] },
+};
+
+test("init (win32): degrades — never reports ready, warns, notifies once", async () => {
+  const notified: string[] = [];
+  const { controller, initOpts } = buildController(WIN_PROFILE, {
+    platform: "win32",
+    hasUI: true,
+    notify: (m) => notified.push(m),
   });
-  // On Windows, applyProfile should set ready=true when profile.enabled.
-  await ctrl.applyProfile({
-    enabled: true,
-    writable: true,
-    allowWrite: ["."],
-    denyWrite: [],
-    denyRead: [],
-    network: { allowedDomains: [], deniedDomains: [] },
-  });
-  assert.equal(ctrl.ready, true);
-  assert.equal(ctrl.warn, undefined);
+  await controller.init(initOpts);
+  assert.equal(controller.ready, false);
+  assert.equal(internals(controller).degraded, true);
+  assert.equal(controller.disabled, false);
+  assert.equal(controller.warn, WINDOWS_NO_SANDBOX_WARN);
+  assert.equal(notified.length, 1);
+  assert.match(notified[0], /no OS sandbox on native Windows/);
+  assert.equal(controller.sandboxManager, null);
 });
 
-test("applyProfile: Windows branch sets warn when disabled", async () => {
-  const ctrl = new SandboxController();
-  // Simulate the --no-sandbox state directly.
-  (ctrl as unknown as { disabled: boolean }).disabled = true;
-  internals(ctrl).degraded = false; // don't return early
-  internals(ctrl).profile = {
-    enabled: true,
-    writable: true,
-    allowWrite: ["."],
-    denyWrite: [],
-    denyRead: [],
-    network: { allowedDomains: [], deniedDomains: [] },
-  };
-  await ctrl.applyProfile({
-    enabled: true,
-    writable: true,
-    allowWrite: ["."],
-    denyWrite: [],
-    denyRead: [],
-    network: { allowedDomains: [], deniedDomains: [] },
+test("init (win32): no notification without a UI", async () => {
+  const notified: string[] = [];
+  const { controller, initOpts } = buildController(WIN_PROFILE, {
+    platform: "win32",
+    hasUI: false,
+    notify: (m) => notified.push(m),
   });
-  assert.equal(ctrl.warn, "sandbox disabled via --no-sandbox");
+  await controller.init(initOpts);
+  assert.equal(controller.ready, false);
+  assert.equal(notified.length, 0);
+});
+
+test("applyProfile (win32): switching modes never flips ready on", async () => {
+  const { controller, initOpts } = buildController(WIN_PROFILE, { platform: "win32" });
+  await controller.init(initOpts);
+  await controller.applyProfile(WIN_PROFILE);
+  await controller.applyProfile({ ...WIN_PROFILE, writable: false, allowWrite: [] });
+  assert.equal(controller.ready, false);
+  assert.equal(controller.warn, WINDOWS_NO_SANDBOX_WARN);
+});
+
+test("bashOps (win32): no sandboxed operations are offered", async () => {
+  const { controller, initOpts } = buildController(WIN_PROFILE, { platform: "win32" });
+  await controller.init(initOpts);
+  assert.equal(controller.bashOps(), null);
+  assert.equal(controller.bashOps({ readOnly: true }), null);
+});
+
+test("init (win32): --no-sandbox still wins (disabled, not the Windows warning)", async () => {
+  const { controller, initOpts } = buildController(WIN_PROFILE, { platform: "win32", noSandbox: true });
+  await controller.init(initOpts);
+  assert.equal(controller.disabled, true);
+  assert.equal(controller.ready, false);
+  assert.equal(controller.warn, undefined);
+});
+
+test("init: other unsupported platforms degrade with a warning", async () => {
+  const { controller, initOpts } = buildController(WIN_PROFILE, { platform: "freebsd" });
+  await controller.init(initOpts);
+  assert.equal(controller.ready, false);
+  assert.equal(controller.warn, "sandbox unsupported on freebsd");
 });
 
 test("applyProfile: degraded returns early", async () => {
@@ -293,62 +299,6 @@ test("applyProfile: degraded returns early", async () => {
     network: { allowedDomains: [], deniedDomains: [] },
   });
   assert.equal(internals(controller).degraded, true); // still degraded
-});
-
-test("applyProfile: disabled profile (enabled=false) keeps ready=false on Windows", async () => {
-  const { controller, initOpts } = buildController({
-    enabled: false,
-    writable: false,
-    allowWrite: [],
-    denyWrite: [],
-    denyRead: [],
-    network: { allowedDomains: [], deniedDomains: [] },
-  });
-  await controller.init(initOpts);
-  // Windows path: ready = !disabled && !!profile.enabled = true && false = false.
-  assert.equal(controller.ready, false);
-});
-
-test("applyProfile: Windows branch sets warn when disabled via --no-sandbox", async () => {
-  const ctrl = new SandboxController();
-  (ctrl as unknown as { disabled: boolean }).disabled = true;
-  await ctrl.applyProfile({
-    enabled: true,
-    writable: true,
-    allowWrite: ["."],
-    denyWrite: [],
-    denyRead: [],
-    network: { allowedDomains: [], deniedDomains: [] },
-  });
-  assert.equal(ctrl.warn, "sandbox disabled via --no-sandbox");
-});
-
-// ---------------------------------------------------------------------------
-// applyProfile — Linux/macOS branch (via fake manager injection)
-// These tests exercise the initialize/reset flow that runs on non-Windows.
-// We inject a fake manager into the controller to bypass the real runtime.
-// On Windows, we can still reach the Linux branch by setting degraded=false
-// and manager=null initially, then calling applyProfile — but since
-// process.platform === "win32", the Windows branch returns first.
-// So we test the Linux path indirectly through bashOps + createSandboxedBashOps.
-// ---------------------------------------------------------------------------
-
-test("bashOps: readOnly creates customConfig on non-Windows", async () => {
-  // On Linux/macOS, bashOps with readOnly passes a customConfig to
-  // createSandboxedBashOps. We test that the flow doesn't crash.
-  const ctrl = new SandboxController();
-  // On Windows, bashOps returns null when disabled.
-  ctrl.disabled = true;
-  const ops = ctrl.bashOps({ readOnly: true });
-  assert.equal(ops, null);
-});
-
-test("bashOps: readOnly sets allowWrite=[] on Windows", async () => {
-  // This branch is only taken on win32. On other platforms, readOnly passes
-  // a customConfig to createSandboxedBashOps. We test that it doesn't throw.
-  const ctrl = new SandboxController();
-  ctrl.disabled = true; // forces early return on non-Windows
-  assert.equal(ctrl.bashOps({ readOnly: true }), null);
 });
 
 // ---------------------------------------------------------------------------
@@ -459,8 +409,7 @@ test("createSandboxedBashOps: customConfig passes through", async () => {
 // bashOps (platform-neutral)
 // ---------------------------------------------------------------------------
 
-test("bashOps: returns null when no manager and not win32", async () => {
-  // On non-Windows, if the manager was never set (degraded), bashOps returns null.
+test("bashOps: returns null when degraded (no manager)", async () => {
   const ctrl = new SandboxController();
   ctrl.disabled = true;
   internals(ctrl).degraded = true;

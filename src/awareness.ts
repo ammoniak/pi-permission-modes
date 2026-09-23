@@ -62,10 +62,7 @@ export function sandboxAwarenessPrompt(mode: ModeDef, opts: AwarenessOptions): s
     ].join("\n");
   }
 
-  // On Windows, the sandbox uses path confinement (policy-enforced) instead of
-  // an OS-level sandbox like bubblewrap.
-  const sandboxType = process.platform === "win32" ? "a path-confinement sandbox" : "an OS-level sandbox";
-  const lines = [header, "", `Bash runs inside ${sandboxType} with these boundaries:`, ""];
+  const lines = [header, "", "Bash runs inside an OS-level sandbox with these boundaries:", ""];
 
   if (!sb.writable) {
     lines.push(

@@ -167,3 +167,50 @@ test("analyzeBash: real grammar sees through wrappers and shell -c (skips if WAS
   const benign = await analyzeBash("grep sudo README.md", "/home/u/projX");
   assert.equal(benign.outsideReason, undefined);
 });
+
+// --- win32 --------------------------------------------------------------------
+const WIN = {
+  platform: "win32" as const,
+  home: "C:\\Users\\u",
+  env: { USERPROFILE: "C:\\Users\\u" },
+};
+const WIN_ROOT = "C:\\ws\\proj";
+const REGRESSION = "Remove-Item $env:USERPROFILE\\Documents\\Steuererklärung_2025.pdf";
+
+test("outsideReasonFromCommands (win32): PowerShell env-var path is an escape", () => {
+  assert.equal(
+    outsideReasonFromCommands([bc("Remove-Item", "$env:USERPROFILE\\Documents\\Steuererklärung_2025.pdf")], WIN_ROOT, WIN),
+    "path outside project: $env:USERPROFILE\\Documents\\Steuererklärung_2025.pdf",
+  );
+  assert.equal(outsideReasonFromCommands([bc("Remove-Item", ".\\build\\x")], WIN_ROOT, WIN), undefined);
+});
+
+test("outsideReasonFromCommands (win32): powershell -Command / cmd /c scripts are split", () => {
+  const ps = bc("powershell", "-NoProfile", "-Command", "Remove-Item $env:USERPROFILE\\Documents\\x.pdf");
+  assert.equal(outsideReasonFromCommands([ps], WIN_ROOT, WIN), "path outside project: $env:USERPROFILE\\Documents\\x.pdf");
+  const cmdC = bc("cmd.exe", "/c", "del %USERPROFILE%\\x.pdf");
+  assert.equal(outsideReasonFromCommands([cmdC], WIN_ROOT, WIN), "path outside project: %USERPROFILE%\\x.pdf");
+  assert.equal(outsideReasonFromCommands([bc("cmd", "/c", "dir /s")], WIN_ROOT, WIN), undefined);
+});
+
+test("outsideReasonFromCommands (win32): encoded PowerShell and RunAs prompt", () => {
+  assert.equal(outsideReasonFromCommands([bc("pwsh", "-enc", "ZQBjAGgAbwA=")], WIN_ROOT, WIN), "encoded PowerShell command");
+  assert.equal(
+    outsideReasonFromCommands([bc("Start-Process", "pwsh", "-Verb", "RunAs")], WIN_ROOT, WIN),
+    "privilege escalation",
+  );
+  // Not on POSIX: `-enc` there is just an argument.
+  assert.equal(outsideReasonFromCommands([bc("pwsh", "-enc", "x")], "/p", { platform: "linux" }), undefined);
+});
+
+test("analyzeBash (win32): the reported regression prompts (skips if WASM absent)", async () => {
+  const a = await analyzeBash(REGRESSION, WIN_ROOT, WIN);
+  if (a.usedFallback) return; // tree-sitter WASM unavailable in this env
+  // tree-sitter keeps `$env:USERPROFILE\…` as one literal concatenation token.
+  assert.deepEqual(a.commands, [
+    { name: "Remove-Item", args: ["$env:USERPROFILE\\Documents\\Steuererklärung_2025.pdf"], isNested: false },
+  ]);
+  assert.equal(a.outsideReason, "path outside project: $env:USERPROFILE\\Documents\\Steuererklärung_2025.pdf");
+  const quoted = await analyzeBash(`Remove-Item "$env:USERPROFILE\\Documents\\x.pdf"`, WIN_ROOT, WIN);
+  assert.match(quoted.outsideReason ?? "", /path outside project/);
+});

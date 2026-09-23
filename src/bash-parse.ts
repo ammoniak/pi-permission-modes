@@ -18,10 +18,8 @@
  */
 
 import { createRequire } from "node:module";
-import os from "node:os";
 import path from "node:path";
-import { bashConfirmReason, PRIVILEGE_RE } from "./heuristics.ts";
-import { isOutside, SAFE_OUTSIDE_RE } from "./paths.ts";
+import { bashConfirmReason, isOutsideToken, type PathCheckOptions, PRIVILEGE_RE } from "./heuristics.ts";
 
 /** One command extracted from a bash line. */
 export interface BashCommand {
@@ -119,6 +117,8 @@ export function isPrivilegeEscalation(c: BashCommand): boolean {
   let rest = c.args;
   for (let hops = 0; hops < 8; hops++) {
     if (PRIVILEGE_RE.test(path.basename(head))) return true;
+    // PowerShell elevation: `Start-Process x -Verb RunAs` (alias saps/start).
+    if (/^(start-process|saps|start)$/i.test(head) && rest.some((a) => /^runas$/i.test(a))) return true;
     if (!WRAPPER_COMMANDS.has(path.basename(head))) return false;
     const idx = rest.findIndex((a) => !SKIPPABLE_WRAPPER_ARG.test(a));
     if (idx === -1) return false;
@@ -178,22 +178,43 @@ export function expandShellCommands(
   return out;
 }
 
+/** Windows shells whose script arguments aren't bash (tree-sitter can't expand them). */
+const WIN_SHELL_RE = /^(powershell|pwsh|cmd)(\.exe)?$/i;
+/** PowerShell `-EncodedCommand` and its abbreviations: an opaque script. */
+const PS_ENCODED_RE = /^-(e|ec|enc|encodedcommand)$/i;
+
+/**
+ * Tokens to path-check for a command. For `powershell|pwsh|cmd` the script
+ * arguments (`-Command "Remove-Item $env:X\y"`, `/c "del %X%\y"`) are split
+ * into their words too, since tree-sitter only sees them as one string.
+ */
+function pathTokens(c: BashCommand): string[] {
+  const toks = [c.name, ...c.args];
+  if (!WIN_SHELL_RE.test(path.win32.basename(c.name))) return toks;
+  for (const a of c.args) toks.push(...a.split(/[\s;|&(){}<>,=]+/).filter(Boolean));
+  return toks;
+}
+
 /**
  * Reason to prompt (escape / privilege) derived from extracted commands — the
  * AST-based equivalent of `bashConfirmReason`, but it also sees commands and
- * paths nested inside substitutions/subshells.
+ * paths nested inside substitutions/subshells. On win32 (see `isOutsideToken`)
+ * Windows paths, `~\`, `$env:X`, `%X%` count too, and a PowerShell
+ * `-EncodedCommand` always prompts (its target can't be inspected).
  */
-export function outsideReasonFromCommands(commands: BashCommand[], root: string): string | undefined {
+export function outsideReasonFromCommands(
+  commands: BashCommand[],
+  root: string,
+  opts: PathCheckOptions = {},
+): string | undefined {
+  const win = (opts.platform ?? process.platform) === "win32";
   for (const c of commands) {
     if (isPrivilegeEscalation(c)) return "privilege escalation";
-    for (const tok of [c.name, ...c.args]) {
-      let target: string | undefined;
-      if (tok.startsWith("/")) target = tok;
-      else if (tok === "~" || tok.startsWith("~/")) target = path.join(os.homedir(), tok.slice(1));
-      else if (tok.includes("/") || tok === "..") target = path.resolve(root, tok);
-      else continue;
-      if (SAFE_OUTSIDE_RE.test(target)) continue;
-      if (isOutside(root, target)) return `path outside project: ${tok}`;
+    if (win && WIN_SHELL_RE.test(path.win32.basename(c.name)) && c.args.some((a) => PS_ENCODED_RE.test(a))) {
+      return "encoded PowerShell command";
+    }
+    for (const tok of pathTokens(c)) {
+      if (isOutsideToken(tok, root, opts)) return `path outside project: ${tok}`;
     }
   }
   return undefined;
@@ -243,17 +264,17 @@ export interface BashAnalysis {
 }
 
 /** Analyze a bash command via tree-sitter, falling back to the regex heuristic. */
-export async function analyzeBash(command: string, root: string): Promise<BashAnalysis> {
+export async function analyzeBash(command: string, root: string, opts: PathCheckOptions = {}): Promise<BashAnalysis> {
   const parser = await getTreeSitterParser();
   if (parser) {
     try {
       // Expand shell -c scripts so `bash -c 'sudo …'` exposes its inner
       // commands to privilege/escape detection and policy matching alike.
       const commands = expandShellCommands((s) => parser.parse(s), parser.parse(command));
-      return { commands, outsideReason: outsideReasonFromCommands(commands, root), usedFallback: false };
+      return { commands, outsideReason: outsideReasonFromCommands(commands, root, opts), usedFallback: false };
     } catch {
       // parse failure → fall through to the heuristic
     }
   }
-  return { commands: [], outsideReason: bashConfirmReason(command, root), usedFallback: true };
+  return { commands: [], outsideReason: bashConfirmReason(command, root, opts), usedFallback: true };
 }

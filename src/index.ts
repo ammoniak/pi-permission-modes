@@ -49,7 +49,7 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { askWithSession, SessionApprovals } from "./approvals.ts";
 import { sandboxAwarenessPrompt } from "./awareness.ts";
-import { bashExecPlan, bashGate } from "./bash-enforce.ts";
+import { bashExecPlan, bashGate, resolveBashOps } from "./bash-enforce.ts";
 import { analyzeBash } from "./bash-parse.ts";
 import {
   isUnsafeDomain,
@@ -408,7 +408,7 @@ export default async function (pi: ExtensionAPI) {
       const approved = approvedUnsandboxed.delete(id); // user granted an escape
       const m = currentMode();
       const plan = bashExecPlan(m.sandbox.enabled, m.sandbox.writable, sandbox.ready, approved);
-      const ops = plan.sandboxed ? sandbox.bashOps({ readOnly: plan.readOnly }) : null;
+      const ops = resolveBashOps(plan, () => sandbox.bashOps({ readOnly: plan.readOnly }));
       if (!ops) return localBash.execute(id, params, signal, onUpdate);
       const sandboxed = createBashTool(root, { operations: ops });
       return sandboxed.execute(id, params, signal, onUpdate);

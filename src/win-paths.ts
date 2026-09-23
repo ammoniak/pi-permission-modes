@@ -1,12 +1,16 @@
 /**
- * Windows-specific path utilities for containment checks.
+ * Windows path utilities for the bash escape heuristic.
  *
- * Provides path normalization and protected-path detection for native Windows
- * environments where the OS-level sandbox (bubblewrap/sandbox-exec) is not
- * available. This module is pure and SDK-free.
+ * On native Windows the model's "bash" commands are often PowerShell or cmd
+ * syntax (`Remove-Item $env:USERPROFILE\Documents\x.pdf`, `del %USERPROFILE%\x`)
+ * whose path arguments use backslashes, drive letters, and environment
+ * variables the POSIX token scan never recognizes. `winPathCandidate` resolves
+ * such a token to an absolute win32 path so the escape check can flag it.
+ *
+ * Pure and SDK-free: every path operation goes through `path.win32` and the
+ * environment is injected, so the whole table is unit-tested on any platform.
  */
 
-import os from "node:os";
 import path from "node:path";
 
 /**
@@ -50,118 +54,89 @@ export function getDriveLetter(p: string): string | undefined {
   return m?.[0].slice(0, 1);
 }
 
-/**
- * Check if a path is under the Windows system area.
- */
-export function isWindowsSystemPath(p: string): boolean {
-  const normalized = p.replace(/\//g, "\\").toUpperCase();
+/** What `winPathCandidate` needs to expand a token: project root, home, env. */
+export interface WinPathCtx {
+  /** Absolute win32 project root (relative tokens resolve against it). */
+  root: string;
+  /** The user's home directory (`~`, `$HOME`). */
+  home: string;
+  /** Environment for `$env:X` / `%X%` / `$X` (looked up case-insensitively). */
+  env: Record<string, string | undefined>;
+}
 
-  const systemPrefixes = [
-    "C:\\WINDOWS\\SYSTEM32",
-    "C:\\WINDOWS\\SYSWOW64",
-    "C:\\WINDOWS\\SYSTEM",
-    "C:\\WINDOWS",
-  ];
+/** PowerShell provider prefixes that still address the filesystem. */
+const PROVIDER_PREFIX_RE = /^(?:Microsoft\.PowerShell\.Core\\)?FileSystem::/i;
 
-  for (const prefix of systemPrefixes) {
-    if (normalized.startsWith(prefix)) return true;
+/** A leading variable reference: `${env:X}`, `$env:X`, `${X}`, `$X`, `%X%`. */
+const LEADING_VAR_RE = /^(?:\$\{env:(\w+)\}|\$env:(\w+)|\$\{(\w+)\}|\$(\w+)|%(\w+)%)(?=$|[\\/])/i;
+
+function lookupEnv(env: Record<string, string | undefined>, name: string): string | undefined {
+  const want = name.toLowerCase();
+  for (const [k, v] of Object.entries(env)) {
+    if (k.toLowerCase() === want && v) return v;
   }
+  return undefined;
+}
 
-  // Check if any segment matches system directories anywhere in the path
-  const segments = normalized.split("\\");
-  const protectedSegments = new Set([
-    "WINDOWS",
-    "SYSTEM32",
-    "SYSWOW64",
-    "SYSTEM",
-    "PROGRAM FILES",
-    "PROGRAMFILES",
-    "PROGRAMDATA",
-    "PROGRAMDATA",
-    "WINDOWSSYSTEM32",
-  ]);
-
-  for (const seg of segments) {
-    if (protectedSegments.has(seg)) return true;
-  }
-
-  return false;
+/** Expand a variable name to a path; HOME/PWD have shell-level meanings. */
+function expandVar(name: string, ctx: WinPathCtx): string | undefined {
+  const upper = name.toUpperCase();
+  if (upper === "PWD") return ctx.root;
+  if (upper === "HOME") return ctx.home;
+  return lookupEnv(ctx.env, name);
 }
 
 /**
- * Protected directories for Windows containment.
- * These are directories that should trigger prompts or blocks when accessed.
+ * Resolve a shell token to an absolute win32 path, or undefined when the
+ * token isn't path-like (or references a variable we can't expand — the
+ * heuristic only flags what it can see; it is not the enforcement).
+ *
+ * Recognized: drive paths (`C:\x`, `c:/x`), drive-relative (`D:x`), UNC
+ * (`\\srv\share`), Git Bash drive paths (`/c/x`), home (`~`, `~\x`, `~/x`),
+ * variables (`$env:X`, `${env:X}`, `$X`, `${X}`, `%X%` — followed by a
+ * separator or alone), and relative paths with a separator or `..`.
+ * Other POSIX-absolute tokens (`/tmp/x`) return undefined so the caller's
+ * POSIX check still handles them.
  */
-export const WINDOWS_PROTECTED_DIRS = [
-  ".git",
-  "node_modules",
-  ".vscode",
-  ".idea",
-  "Windows",
-  "System32",
-  "SysWOW64",
-  "Program Files",
-  "ProgramData",
-  "WindowsApps",
-];
+export function winPathCandidate(tok: string, ctx: WinPathCtx): string | undefined {
+  let t = tok.replace(/["'`]/g, "").trim();
+  if (!t) return undefined;
+  t = t.replace(PROVIDER_PREFIX_RE, "");
 
-/**
- * Windows protected file basenames (shell configs, system files).
- */
-export const WINDOWS_PROTECTED_FILES = new Set([
-  // Windows shell configs
-  ".bashrc",
-  ".bash_profile",
-  ".zshrc",
-  ".profile",
-  ".gitconfig",
-  ".gitmodules",
-  ".npmrc",
-  // System files that should not be written
-  "bootmgr",
-  "ntldr",
-  "pagefile.sys",
-  "swapfile.sys",
-  "hiberfil.sys",
-]);
+  const v = LEADING_VAR_RE.exec(t);
+  if (v) {
+    const name = v[1] ?? v[2] ?? v[3] ?? v[4] ?? v[5];
+    const base = expandVar(name, ctx);
+    if (!base) return undefined;
+    t = base + t.slice(v[0].length);
+  } else if (t === "~" || t.startsWith("~\\") || t.startsWith("~/")) {
+    t = ctx.home + t.slice(1);
+  }
 
-/**
- * Windows environment variable prefixes to protect in heuristics.
- */
-export const WINDOWS_ENV_PROTECTED = new Set([
-  "PATH",
-  "SYSTEMROOT",
-  "WINDIR",
-  "PROGRAMFILES",
-  "PROGRAMDATA",
-  "PROGRAMFILES(X86)",
-  "ALLUSERSPROFILE",
-]);
+  if (/^\/[a-zA-Z]\//.test(t)) return path.win32.normalize(normalizeWindowsPath(t));
+  if (t.startsWith("/")) return undefined; // POSIX-absolute: left to the caller
+  if (t.startsWith("\\\\")) return path.win32.normalize(t); // UNC
+  if (isDriveLetterPath(t)) return path.win32.normalize(t);
 
-/**
- * Check if a path is a Windows home directory path.
- */
-export function isWindowsHomePath(p: string): boolean {
-  const home = os.homedir();
-  const normalized = p.replace(/\//g, "\\").toUpperCase();
-  const homeUpper = home.toUpperCase();
-  return normalized.startsWith(homeUpper);
+  const driveRel = /^([a-zA-Z]):(.*)$/.exec(t);
+  if (driveRel) {
+    const [, drive, rest] = driveRel;
+    if (drive.toUpperCase() !== getDriveLetter(ctx.root)?.toUpperCase()) {
+      return path.win32.normalize(`${drive}:\\${rest}`);
+    }
+    return path.win32.resolve(ctx.root, rest);
+  }
+
+  if (t.includes("\\") || t.includes("/") || t === "..") return path.win32.resolve(ctx.root, t);
+  return undefined;
 }
 
 /**
- * Check if a path refers to a registry hive file (Windows SAM, SYSTEM, etc.).
+ * Lexical, case-insensitive containment test for absolute win32 paths: true
+ * when `target` is not `root` or below it. A sibling sharing the root's
+ * prefix (`C:\ws\proj2` vs `C:\ws\proj`) is outside.
  */
-export function isRegistryHivePath(p: string): boolean {
-  const upper = p.replace(/\//g, "\\").toUpperCase();
-  const hivePatterns = [
-    "\\SYSTEM32\\CONFIG\\SAM",
-    "\\SYSTEM32\\CONFIG\\SYSTEM",
-    "\\SYSTEM32\\CONFIG\\SOFTWARE",
-    "\\SYSTEM32\\CONFIG\\SECURITY",
-    "\\SYSTEM32\\CONFIG\\DEFAULT",
-  ];
-  for (const pat of hivePatterns) {
-    if (upper.endsWith(pat)) return true;
-  }
-  return false;
+export function isOutsideWin(root: string, target: string): boolean {
+  const rel = path.win32.relative(root.toLowerCase(), target.toLowerCase());
+  return rel === ".." || rel.startsWith("..\\") || path.win32.isAbsolute(rel);
 }

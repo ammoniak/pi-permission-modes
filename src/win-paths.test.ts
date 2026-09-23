@@ -1,6 +1,6 @@
 /**
- * Unit tests for win-paths.ts — pure path normalization and detection
- * utilities for Windows path confinement.
+ * Unit tests for win-paths.ts — pure Windows path normalization and the token
+ * resolver behind the win32 bash escape heuristic.
  *
  * These functions are pure and SDK-free, so they test easily without mocking.
  */
@@ -11,12 +11,9 @@ import {
   normalizeWindowsPath,
   isDriveLetterPath,
   getDriveLetter,
-  isWindowsSystemPath,
-  isWindowsHomePath,
-  isRegistryHivePath,
-  WINDOWS_PROTECTED_DIRS,
-  WINDOWS_PROTECTED_FILES,
-  WINDOWS_ENV_PROTECTED,
+  isOutsideWin,
+  winPathCandidate,
+  type WinPathCtx,
 } from "./win-paths.ts";
 
 // ---------------------------------------------------------------------------
@@ -79,83 +76,64 @@ test("getDriveLetter: returns undefined for non-drive paths", () => {
 });
 
 // ---------------------------------------------------------------------------
-// isWindowsSystemPath
+// winPathCandidate
 // ---------------------------------------------------------------------------
 
-test("isWindowsSystemPath: system prefixes", () => {
-  assert.ok(isWindowsSystemPath("C:\\Windows\\System32\\cmd.exe"));
-  assert.ok(isWindowsSystemPath("C:\\WINDOWS\\SYSTEM"));
-  assert.ok(isWindowsSystemPath("C:\\Windows\\SysWOW64\\wow64.dll"));
-  assert.ok(isWindowsSystemPath("C:\\Windows"));
+const ctx: WinPathCtx = {
+  root: "C:\\ws\\proj",
+  home: "C:\\Users\\u",
+  env: { USERPROFILE: "C:\\Users\\u", APPDATA: "C:\\Users\\u\\AppData\\Roaming", SystemRoot: "C:\\Windows" },
+};
+
+test("winPathCandidate: resolves Windows-shaped tokens", () => {
+  const cases: Array<[string, string]> = [
+    // the reported regression
+    ["$env:USERPROFILE\\Documents\\Steuererklärung_2025.pdf", "C:\\Users\\u\\Documents\\Steuererklärung_2025.pdf"],
+    ["${env:USERPROFILE}\\x", "C:\\Users\\u\\x"],
+    ["$env:userprofile/x", "C:\\Users\\u\\x"],
+    ["%USERPROFILE%\\x", "C:\\Users\\u\\x"],
+    ["%appdata%\\x", "C:\\Users\\u\\AppData\\Roaming\\x"],
+    ["$HOME/x", "C:\\Users\\u\\x"],
+    ["$HOME", "C:\\Users\\u"],
+    ["$USERPROFILE/x", "C:\\Users\\u\\x"],
+    ["~", "C:\\Users\\u"],
+    ["~\\x", "C:\\Users\\u\\x"],
+    ["~/x", "C:\\Users\\u\\x"],
+    ["C:\\Users\\u\\x", "C:\\Users\\u\\x"],
+    ["c:/users/u/x", "c:\\users\\u\\x"],
+    ["D:foo", "D:\\foo"],
+    ["C:src\\a", "C:\\ws\\proj\\src\\a"],
+    ["\\\\srv\\share\\x", "\\\\srv\\share\\x"],
+    ["/c/Users/u/x", "C:\\Users\\u\\x"],
+    ["..\\x", "C:\\ws\\x"],
+    ["..", "C:\\ws"],
+    [".\\src\\a", "C:\\ws\\proj\\src\\a"],
+    ["src/a", "C:\\ws\\proj\\src\\a"],
+    ["$PWD\\src", "C:\\ws\\proj\\src"],
+    ['"$env:USERPROFILE"\\Documents', "C:\\Users\\u\\Documents"],
+    ["FileSystem::C:\\x", "C:\\x"],
+    ["Microsoft.PowerShell.Core\\FileSystem::C:\\x", "C:\\x"],
+  ];
+  for (const [tok, want] of cases) assert.equal(winPathCandidate(tok, ctx), want, tok);
 });
 
-test("isWindowsSystemPath: segment detection", () => {
-  assert.ok(isWindowsSystemPath("C:\\Program Files\\App"));
-  assert.ok(isWindowsSystemPath("C:\\ProgramData\\foo"));
-});
-
-test("isWindowsSystemPath: non-system paths", () => {
-  assert.ok(!isWindowsSystemPath("C:\\Users\\proj\\src"));
-  assert.ok(!isWindowsSystemPath("D:\\Games\\App"));
-});
-
-// ---------------------------------------------------------------------------
-// isWindowsHomePath
-// ---------------------------------------------------------------------------
-
-test("isWindowsHomePath: matches home directory", async () => {
-  const { homedir } = await import("node:os");
-  const home = homedir();
-  if (!home) return;
-  const result = isWindowsHomePath(home);
-  assert.equal(result, true);
-  const result2 = isWindowsHomePath(home + "\\some\\file");
-  assert.equal(result2, true);
-});
-
-test("isWindowsHomePath: non-home paths", () => {
-  const result = isWindowsHomePath("Z:\\other\\path");
-  assert.equal(result, false);
-});
-
-// ---------------------------------------------------------------------------
-// isRegistryHivePath
-// ---------------------------------------------------------------------------
-
-test("isRegistryHivePath: recognized hive patterns", () => {
-  assert.ok(isRegistryHivePath("C:\\Windows\\System32\\Config\\SAM"));
-  assert.ok(isRegistryHivePath("C:\\Windows\\System32\\Config\\SYSTEM"));
-  assert.ok(isRegistryHivePath("C:\\Windows\\System32\\Config\\SOFTWARE"));
-  assert.ok(isRegistryHivePath("C:\\Windows\\System32\\Config\\SECURITY"));
-  assert.ok(isRegistryHivePath("C:\\Windows\\System32\\Config\\DEFAULT"));
-});
-
-test("isRegistryHivePath: non-hive paths", () => {
-  assert.ok(!isRegistryHivePath("C:\\Users\\proj\\config.json"));
-  assert.ok(!isRegistryHivePath("C:\\Windows\\System32\\drivers"));
+test("winPathCandidate: non-path or unexpandable tokens are undefined", () => {
+  for (const tok of ["git", "-Recurse", "$env:UNKNOWN\\x", "$null", "$_.FullName", "/tmp/x", "/dev/null", ""]) {
+    assert.equal(winPathCandidate(tok, ctx), undefined, tok);
+  }
 });
 
 // ---------------------------------------------------------------------------
-// Constants
+// isOutsideWin
 // ---------------------------------------------------------------------------
 
-test("WINDOWS_PROTECTED_DIRS: includes expected entries", () => {
-  assert.ok(WINDOWS_PROTECTED_DIRS.includes(".git"));
-  assert.ok(WINDOWS_PROTECTED_DIRS.includes("node_modules"));
-  assert.ok(WINDOWS_PROTECTED_DIRS.includes("Windows"));
-  assert.ok(WINDOWS_PROTECTED_DIRS.includes("System32"));
-  assert.ok(WINDOWS_PROTECTED_DIRS.includes("Program Files"));
+test("isOutsideWin: containment is case-insensitive and boundary-aware", () => {
+  assert.equal(isOutsideWin("C:\\ws\\proj", "C:\\ws\\proj"), false);
+  assert.equal(isOutsideWin("C:\\ws\\proj", "c:\\WS\\Proj\\src\\a.ts"), false);
+  assert.equal(isOutsideWin("C:\\ws\\proj", "C:\\ws\\proj2\\x"), true); // prefix trap
+  assert.equal(isOutsideWin("C:\\ws\\proj", "C:\\ws"), true);
+  assert.equal(isOutsideWin("C:\\ws\\proj", "C:\\Users\\u\\Documents\\x.pdf"), true);
+  assert.equal(isOutsideWin("C:\\ws\\proj", "D:\\ws\\proj"), true);
+  assert.equal(isOutsideWin("C:\\ws\\proj", "\\\\srv\\share"), true);
 });
 
-test("WINDOWS_PROTECTED_FILES: includes expected entries", () => {
-  assert.ok(WINDOWS_PROTECTED_FILES.has(".gitconfig"));
-  assert.ok(WINDOWS_PROTECTED_FILES.has("bootmgr"));
-  assert.ok(WINDOWS_PROTECTED_FILES.has("pagefile.sys"));
-});
-
-test("WINDOWS_ENV_PROTECTED: includes expected entries", () => {
-  assert.ok(WINDOWS_ENV_PROTECTED.has("PATH"));
-  assert.ok(WINDOWS_ENV_PROTECTED.has("SYSTEMROOT"));
-  assert.ok(WINDOWS_ENV_PROTECTED.has("WINDIR"));
-  assert.ok(WINDOWS_ENV_PROTECTED.has("PROGRAMFILES"));
-});
